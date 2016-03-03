@@ -3,6 +3,7 @@
  * 
  * name: Abhijit Patel
  * id: 201401432
+ * email-id: 201401432@daiict.ac.in
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -79,8 +80,8 @@ struct job_t *getjobpid(struct job_t *jobs, pid_t pid);
 struct job_t *getjobjid(struct job_t *jobs, int jid); 
 int pid2jid(pid_t pid); 
 void listjobs(struct job_t *jobs);
-int convertNumber(char *arr);
-int checkNumber(char *arr);
+int convertNumber(char *arr);      /* a function to convert string to number, here convert string to jid or pid */
+int checkNumber(char *arr);        /* a function to check the given string is Num or not */
 void usage(void);
 void unix_error(char *msg);
 void app_error(char *msg);
@@ -167,49 +168,76 @@ int main(int argc, char **argv)
 */
 void eval(char *cmdline) 
 {
-    char arguments[MAXARGS][MAXLINE];
+    char *argv[MAXARGS];
+    int bg;                     /*a flag to check if the requested job is bg or fg*/
+    pid_t pid;
+    sigset_t mask;               /* define signal set */
+    struct job_t *job;
 
-    char **argv=arguments;
-    sigset_t mask;
-    if(*cmdline=='\n' || *cmdline==' ') return;
+    if(*cmdline=='\n' || *cmdline==' '){    /*if the command given by user is whitespace then return*/
+        return;
+    }
     
-    parseline(cmdline,argv);
-    if(builtin_cmd(argv))return ;
-    else{
-        if(sigemptyset(&mask) != 0){
+    bg=parseline(cmdline,argv);
+        if(builtin_cmd(argv)){           /*Return if the given command is built-in*/
+             return ;
+        }
+         
+        if(sigemptyset(&mask) != 0){     /*initialize signal set to be empty*/
             unix_error("sigemptyset error!");
         }
         
-        if(sigaddset(&mask, SIGCHLD) != 0){
+        if(sigaddset(&mask, SIGCHLD) != 0){    /*Add SIGCHLD signal to signal set*/
             unix_error("sigaddset error!");
         }
 
-        if(sigprocmask(SIG_BLOCK, &mask, NULL)){
+        if(sigprocmask(SIG_BLOCK, &mask, NULL)){    /*Block signal before fork*/
             unix_error("sigprocmask error!");
         }
-        pid_t pid;
-        if(pid = fork() < 0){
-            unix_error("forking error!");
+        if ((pid = fork()) < 0){
+            unix_error("Fork error");
         }
 
         else if(pid == 0){
-            if(sigprocmask(SIG_UNBLOCK, &mask, NULL) != 0){
+            if(sigprocmask(SIG_UNBLOCK, &mask, NULL) != 0){   /*Unblock signal in child's instance*/
                  unix_error("sigprocmask error!");
             }
 
-            if(setpgrp() < 0){
-                 unix_error("setpgrp error!");
+            if(setpgid(0, 0) < 0){                     /*Make new process group with child as leader*/
+                 unix_error("setpgid error!");
             }
-
-            if(execvp(*argv,argv)<0)
-            {
-               printf("%s: Command not found\n",*argv);
+            
+            if(execvp(*argv,argv)<0){                  /*Execute the child process*/
+               printf("%s: Command not found \n",argv[0]);
                exit(0);
       	    }
             
         }
-        waitfg(pid);
-    }
+        else {
+            /* Check if the requested job is fg or bg 
+             * and accordingly add the job to job table 
+             * with their respective states
+             */
+            if(!bg){                                  
+                addjob(jobs, pid, FG, cmdline);
+            }
+            else {
+                addjob(jobs, pid, BG, cmdline);
+            }
+
+            if (sigprocmask(SIG_UNBLOCK, &mask, NULL) != 0){   /*Unblock signal in parent's instance*/
+                unix_error("sigprocmask error");
+            }
+			
+	    if (!bg){             /*For fg job*/
+                waitfg(pid);
+            } 
+            else {                /*For bg job*/
+                job = getjobpid(jobs, pid);
+                printf("[%d] (%d) %s", job->jid, job->pid, job->cmdline);
+            }
+        }
+    
     return;
 }
 
@@ -277,21 +305,25 @@ int parseline(const char *cmdline, char **argv)
 int builtin_cmd(char **argv) 
 {
 
-   if(!strcmp(*argv,"fg") || !strcmp(*argv,"bg"))
+   if(!strcmp(*argv,"fg") || !strcmp(*argv,"bg"))  /*Pass the arguments to do_fgbg if first argument is fg or bg*/
     {
-        printf("in fgbg\n");
         do_bgfg(argv);
         return 1;
     }
     
-    else if (!strcmp(*argv,"quit") && argv[1]=='\0')
+    else if (!strcmp(*argv,"quit") && argv[1]=='\0')  /*Quit if argument is quit given no stopped jobs*/
     {
-        printf("Quitting\n");
+        int i;
+        for(i = 0; i <= MAXJID; i++){                 /*Check for any stopped job*/
+            if((jobs[i].state) == ST ){
+                 printf("%d job is stopped\n",jobs[i].jid);
+                 return 1;
+            }
+        }
         exit(0);
     }
-    else if (!strcmp(*argv,"jobs"))
+    else if (!strcmp(*argv,"jobs"))        /*List of current jobs*/
     {
-        printf("Listing jobs!\n");
         listjobs(jobs);
         return 1;
     }
@@ -303,54 +335,57 @@ int builtin_cmd(char **argv)
  */
 void do_bgfg(char **argv) 
 {
-    struct job_t *job = NULL;
-    if(argv[1]=='\0')
-    {
-         printf("requires pid or jid!\n"); 
+    struct job_t *p = NULL;
+    if(argv[1]=='\0') {     /*Checking if no arguments after bg or fg*/
+         printf("%s command requires PID or %%jobid argument\n",argv[0]); 
          return;
     }
-    else if(!checkNumber(argv[1]))
+    else if(!checkNumber(argv[1]))  /*Check if given string is numberic or not*/     
     {
-       printf("must be a pid\n");
+       printf("%s: argument must be a PID or %%jobid\n",argv[0]);
        return;
     }
     else 
     {
     int pid=convertNumber(argv[1]);
 
-        if(argv[1][0]!='%')
+        if(argv[1][0] == '%')         /*for jobs*/
         {
-            struct job_t *p;
-            p= getjobpid(jobs,pid); 
-            if(p==NULL)
+            //struct job_t *p;
+            p= getjobjid(jobs,pid); 
+            if(p==NULL)               /*If no job print error*/
             {
-                 printf("(%d) : No such process\n",pid);
+                 printf("%s: No such job\n",argv[1]);
                  return;
             }     
         }
         else 
-        {
-            struct job_t *p;
-            p= getjobjid(jobs,pid); 
-            if(p==NULL)
+        {                          /*for processes*/
+            //struct job_t *p;
+            p= getjobpid(jobs,pid); 
+            if(p==NULL)            /*If no process print error*/
             {
-                 printf("fg %s : No such job\n",argv[1]);
+                 printf("(%s): No such process\n",argv[1]);
                  return;
             }
            
         }
     }
     
-    if(!strcmp(argv[1],"bg")){
-        job->state = BG;
-        kill(-(job->pid), SIGCONT);
-        printf("[%d] (%d) %s",job->jid, job->pid, job->cmdline);
+    if(!strcmp("bg",argv[0])){       /*For bg process*/
+        p->state = BG;               /*set state to BG*/
+        if(kill(-(p->pid), SIGCONT)){
+            unix_error("Kill error");
+        }
+        printf("[%d] (%d) %s",p->jid, p->pid, p->cmdline);
     }
 
-    else if(!strcmp(argv[1],"fg")){
-        job->state = FG;
-        kill(-(job->pid), SIGCONT);
-        waitfg(job->pid);
+    else if(!strcmp("fg",argv[0])){   /*For fg process*/
+        p->state = FG;                /*Set state to FG*/
+        if(kill(-(p->pid), SIGCONT)){
+            unix_error("Kill error");
+        }
+        waitfg(p->pid);               /*Block until process pid is no longer the foreground proces*/
     }
     
     else {
@@ -358,30 +393,43 @@ void do_bgfg(char **argv)
     }
     return;
 }
+/*
+ * convertNumbre - Convert the given string to integer (i.e pid_t or job as reqired)
+ * Takes arr 2-D char array as arguments
+ * Returns jid or pid (integer)
+ */
 int convertNumber(char *arr)
 {
-    if(*arr=='%')  arr++;
+    if(*arr=='%')  arr++;  /*Ignore if first char is % */
     return strtol(arr,NULL,10);  
+
 }
+
+/* 
+ * checknumber - Check if given string can be converted to number or not 
+ * Takes string as argument
+ * Returns boolean True if yes string to number conversion is possible 
+ */
 int checkNumber(char *arr)
 {
-
-    //printf("%c",*arr);
-    if(!(*arr=='%' || isdigit(*arr))) 
-     return 0;
+    if(!(*arr=='%' || isdigit(*arr))) return 0;
     else 
     {
-    if(*arr=='%')arr++;
-    while(*arr!='\0')
-    { 
-         if(!isdigit(*arr)) return 0;
-         //printf("%c",*arr);
-         arr++;
-    }
+        if(*arr=='%'){      /*Ignore if first char is % */
+           arr++;
+        }
+
+        while(*arr!='\0')
+        { 
+             if(!isdigit(*arr)){
+                 return 0;
+             }
+         
+             arr++;
+        }
+
     return 1;
     }
-//   printf("\n");
-
 }
 
 /* 
@@ -390,9 +438,11 @@ int checkNumber(char *arr)
 void waitfg(pid_t pid)
 {
     struct job_t *job = getjobpid(jobs, pid);
-    if (job == NULL) return;
+    if (job == NULL){
+        return;
+    }
 
-    while(job->pid == pid && job->state == FG){
+    while(job->pid == pid && job->state == FG){ /*Loop while the state of this entry is FG*/
         sleep(1);
     }
   
@@ -416,25 +466,23 @@ void sigchld_handler(int sig)
     pid_t cpid;
     struct job_t *j;
     while((cpid = waitpid(-1, &status, WNOHANG|WUNTRACED))>0){
-        jb = getjobpid(jobs, cpid);
+        j = getjobpid(jobs, cpid);
        
         if(WIFEXITED(status)){
-            deletejob( jobs, cpid);
+            deletejob( jobs, cpid);                /*Delete jobs if exited normally*/
         }
         
         else if(WIFSIGNALED(status)){
-            printf("Job [%d] (%d) terminated by signal %d \n", j->jid, j->pid,sig);
-            deletejob( jobs, cpid);
+            printf("Job [%d] (%d) terminated by signal 2\n", j->jid, j->pid);
+            deletejob( jobs, cpid);               /*Delete jobs terminated with signals*/
         }
 
         else if(WIFSTOPPED(status)){
-            printf("Job [%d] (%d) stopped by signal: Stopped\n", j->jid, jb->pid);
-            jb->state= ST;
+            printf("Job [%d] (%d) stopped by signal 20\n", j->jid, j->pid);
+            j->state= ST;                         /**Change the state of stopped to ST*/
         }
         
-        if(errno != ECHILD){
-             unix_error("waitpid error");
-        }
+    }
     return;
 }
 
@@ -445,13 +493,20 @@ void sigchld_handler(int sig)
  */
 void sigint_handler(int sig) 
 {
-    pid_t pid = fgpid(jobs);
+    pid_t pid = fgpid(jobs);   /*If there is any fg job than kill that process group. If no such job than return */
+    
     if (pid > 0){
          kill(-pid, SIGINT);
     }
 
     return;
 }
+/* Note 1: The group id of foreground job is the pid stored in job table 
+ * because when any process is created its's process group id is same as its parent's
+ * and process group id is pid of any of its process.
+ */
+
+/* Note 2: Send kill signal with negative value of pid. */
 
 /*
  * sigtstp_handler - The kernel sends a SIGTSTP to the shell whenever
@@ -460,7 +515,8 @@ void sigint_handler(int sig)
  */
 void sigtstp_handler(int sig) 
 {
-    pid_t pid = fgpid(jobs);
+    pid_t pid = fgpid(jobs);   /*If there is any fg job than kill that process group. If no such job than return */
+
     if(pid > 0){
         kill(-pid, SIGTSTP);
     }
